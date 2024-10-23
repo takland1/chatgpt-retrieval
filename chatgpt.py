@@ -28,147 +28,153 @@ os.environ["OPENAI_API_KEY"] = constants.APIKEY
 #    print(model.id)
 # sys.exit()
 
-### Configuration
+class Chatbot:
+    def __init__(self):
+        ### Configuration
 
-# Enable to save to disk & reuse the model (for repeated queries on the same data)
-PERSIST = False
-persistDir = "Bin/ChromaLangchainDb"
+        # Enable to save to disk & reuse the model (for repeated queries on the same data)
+        PERSIST = False
+        persistDir = "Bin/ChromaLangchainDb"
 
-# Start with small models, then you can improve
-modelForEmbeddings = "text-embedding-3-small"  # to text-embedding-3-large
-modelForQA = "gpt-4o-mini"  # to gpt-4 or gpt-4o
+        # Start with small models, then you can improve
+        modelForEmbeddings = "text-embedding-3-small"  # to text-embedding-3-large
+        modelForQA = "gpt-4o-mini"  # to gpt-4 or gpt-4o
 
-### First stage - preparing the index
+        ### First stage - preparing the index
 
-embeddings = OpenAIEmbeddings(model=modelForEmbeddings)
+        embeddings = OpenAIEmbeddings(model=modelForEmbeddings)
 
-if PERSIST and os.path.exists(persistDir):
-    print("Reusing index...\n")
-    vectorstore = Chroma(persist_directory=persistDir, embedding_function=embeddings)
-    index = VectorStoreIndexWrapper(vectorstore=vectorstore)
-else:
-    print("Building index...\n")
+        if PERSIST and os.path.exists(persistDir):
+            print("Reusing index...\n")
+            vectorstore = Chroma(persist_directory=persistDir, embedding_function=embeddings)
+            index = VectorStoreIndexWrapper(vectorstore=vectorstore)
+        else:
+            print("Building index...\n")
 
-    # GLOB note: GLOB doesn't work as expected in DirectoryLoader.
-    # Pattern like "**/obj/**" excludes only files and first-level subfolder,
-    #     but leaving the subfolder content included.
-    # To work around that, I had to repeat this pattern for all levels
-    srcLoader = DirectoryLoader("Source/",
-                                exclude=["*.sln", "*.Config", "*.DotSettings", "*.suo", "*.user", "*.cache", "*.json",
-                                         "*.png",
-                                         "*.svg", "*.ico", "*.drawio", "*.nswag",
-                                         "**/.vs/**", "**/.vs/*", "**/.vs/**/*", "**/.vs/**/**/*", "**/.vs/**/**/**/*",
-                                         "**/.vs/**/**/**/**/*",
-                                         "**/obj/**", "**/obj/*", "**/obj/**/*", "**/obj/**/**/*", "**/obj/**/**/**/*",
-                                         "**/obj/**/**/**/**/*",
-                                         "**/bin/**", "**/bin/*", "**/bin/**/*", "**/bin/**/**/*", "**/bin/**/**/**/*",
-                                         "**/bin/**/**/**/**/*"],
-                                use_multithreading=True)
-    ciLoader = DirectoryLoader("CI/", exclude=["*.json"], use_multithreading=True)
-    docsLoader = DirectoryLoader("Docs/", exclude=["*.svg", "*.zip", "*.drawio"], use_multithreading=True)
-    testDataLoader = DirectoryLoader("TestData/", exclude=["*.mdf", "*.zip", "*.http", "*.json"],
-                                     use_multithreading=True)
-    testDataJsonLoader = DirectoryLoader("TestData/", glob="*.json", loader_cls=JSONLoader, use_multithreading=True)
-    readmeLoader = TextLoader("README.md")
+            # GLOB note: GLOB doesn't work as expected in DirectoryLoader.
+            # Pattern like "**/obj/**" excludes only files and first-level subfolder,
+            #     but leaving the subfolder content included.
+            # To work around that, I had to repeat this pattern for all levels
+            srcLoader = DirectoryLoader("Source/",
+                                        exclude=["*.sln", "*.Config", "*.DotSettings", "*.suo", "*.user", "*.cache", "*.json",
+                                                 "*.png",
+                                                 "*.svg", "*.ico", "*.drawio", "*.nswag",
+                                                 "**/.vs/**", "**/.vs/*", "**/.vs/**/*", "**/.vs/**/**/*", "**/.vs/**/**/**/*",
+                                                 "**/.vs/**/**/**/**/*",
+                                                 "**/obj/**", "**/obj/*", "**/obj/**/*", "**/obj/**/**/*", "**/obj/**/**/**/*",
+                                                 "**/obj/**/**/**/**/*",
+                                                 "**/bin/**", "**/bin/*", "**/bin/**/*", "**/bin/**/**/*", "**/bin/**/**/**/*",
+                                                 "**/bin/**/**/**/**/*"],
+                                        use_multithreading=True)
+            ciLoader = DirectoryLoader("CI/", exclude=["*.json"], use_multithreading=True)
+            docsLoader = DirectoryLoader("Docs/", exclude=["*.svg", "*.zip", "*.drawio"], use_multithreading=True)
+            testDataLoader = DirectoryLoader("TestData/", exclude=["*.mdf", "*.zip", "*.http", "*.json"],
+                                             use_multithreading=True)
+            testDataJsonLoader = DirectoryLoader("TestData/", glob="*.json", loader_cls=JSONLoader, use_multithreading=True)
+            readmeLoader = TextLoader("README.md")
 
-    if PERSIST:
-        index = VectorstoreIndexCreator(embedding=embeddings, vectorstore_cls=Chroma,
-                                        vectorstore_kwargs={"persist_directory": persistDir}).from_loaders(
-            [srcLoader, readmeLoader])
-    else:
-        index = VectorstoreIndexCreator(embedding=embeddings).from_loaders(
-            [srcLoader, ciLoader, docsLoader, testDataLoader, testDataJsonLoader])
+            if PERSIST:
+                index = VectorstoreIndexCreator(embedding=embeddings, vectorstore_cls=Chroma,
+                                                vectorstore_kwargs={"persist_directory": persistDir}).from_loaders(
+                    [srcLoader, readmeLoader])
+            else:
+                index = VectorstoreIndexCreator(embedding=embeddings).from_loaders(
+                    [srcLoader, ciLoader, docsLoader, testDataLoader, testDataJsonLoader])
 
-### Building the conversational chain
-# Basically, it consists of two parts:
-# 1. Retrieving relevant documents
-# 2. Answering the question based on the retrieved documents
+        ### Building the conversational chain
+        # Basically, it consists of two parts:
+        # 1. Retrieving relevant documents
+        # 2. Answering the question based on the retrieved documents
 
-# For the whole chain we will use this model
-llm = ChatOpenAI(model=modelForQA, temperature=0)  # temperature: 0.0 means deterministic, 1.0 means random
+        # For the whole chain we will use this model
+        llm = ChatOpenAI(model=modelForQA, temperature=0)  # temperature: 0.0 means deterministic, 1.0 means random
 
-# I have 'Contributing.md' in the docs, so I ask ChatGpt to follow it when appropriate
-retriever_system_prompt = (
-    "Given a chat history and the latest user question "
-    "which might reference context in the chat history, "
-    "formulate a standalone question which can be understood "
-    "without the chat history. If the question is about code, include the whole classes. "
-    "If the question asks about code, include the contribution guide. "
-    "Do NOT answer the question, "
-    "just reformulate it if needed and otherwise return it as is."
-)
+        # I have 'Contributing.md' in the docs, so I ask ChatGpt to follow it when appropriate
+        retriever_system_prompt = (
+            "Given a chat history and the latest user question "
+            "which might reference context in the chat history, "
+            "formulate a standalone question which can be understood "
+            "without the chat history. If the question is about code, include the whole classes. "
+            "If the question asks about code, include the contribution guide. "
+            "Do NOT answer the question, "
+            "just reformulate it if needed and otherwise return it as is."
+        )
 
-retriever_combined_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", retriever_system_prompt),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ]
-)
+        retriever_combined_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", retriever_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
 
-# Configure the retriever with history awareness
-history_aware_retriever = create_history_aware_retriever(
-    llm,
-    # k: Amount of documents to return (Default: 4), 1 means only the most relevant document
-    index.vectorstore.as_retriever(search_kwargs={"k": 4}),
-    retriever_combined_prompt
-)
+        # Configure the retriever with history awareness
+        self.history_aware_retriever = create_history_aware_retriever(
+            llm,
+            # k: Amount of documents to return (Default: 4), 1 means only the most relevant document
+            index.vectorstore.as_retriever(search_kwargs={"k": 4}),
+            retriever_combined_prompt
+        )
 
-# Configure the question-answering system. Here we also instruct the model to use the contribution guide
-qa_system_prompt = (
-    "You are an assistant for question-answering tasks related to the codebase of the application"
-    "Use the following pieces of retrieved context to answer "
-    "the question. If you don't know the answer, say that you "
-    "don't know. Use three sentences maximum and keep the "
-    "answer concise, but if you asked to write code, write as much as you need"
-    "and by default write in C# using the latest language features and follow the contributing guide."
-    "\n\n"
-    "{context}"
-)
+        # Configure the question-answering system. Here we also instruct the model to use the contribution guide
+        qa_system_prompt = (
+            "You are an assistant for question-answering tasks related to the codebase of the application"
+            "Use the following pieces of retrieved context to answer "
+            "the question. If you don't know the answer, say that you "
+            "don't know. Use three sentences maximum and keep the "
+            "answer concise, but if you asked to write code, write as much as you need"
+            "and by default write in C# using the latest language features and follow the contributing guide."
+            "\n\n"
+            "{context}"
+        )
 
-qa_combined_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", qa_system_prompt),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ]
-)
+        qa_combined_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", qa_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
 
-question_answer_chain = create_stuff_documents_chain(llm, qa_combined_prompt)
+        self.question_answer_chain = create_stuff_documents_chain(llm, qa_combined_prompt)
 
-# In-memory store for chat histories
-store = {}
-
-
-def get_session_history(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = ChatMessageHistory()
-    return store[session_id]
+        # In-memory store for chat histories
+        self.store = {}
 
 
-# Assembling the chain
-conversational_rag_chain = RunnableWithMessageHistory(
-    create_retrieval_chain(history_aware_retriever, question_answer_chain),
-    get_session_history,
-    input_messages_key="input",
-    history_messages_key="chat_history",
-    output_messages_key="answer",
-)
+    def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
+        if session_id not in self.store:
+            self.store[session_id] = ChatMessageHistory()
+        return self.store[session_id]
+
+
+    # Assembling the chain
+    def conversational_rag_chain(self):
+        return RunnableWithMessageHistory(
+            create_retrieval_chain(self.history_aware_retriever, self.question_answer_chain),
+            self.get_session_history,
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
 
 ### Running the chat
-query = None
-if len(sys.argv) > 1:
-    query = sys.argv[1]
-
-while True:
-    if not query:
-        query = input("Prompt: ")
-    if query in ['quit', 'q', 'exit']:
-        sys.exit()
-    result = conversational_rag_chain.invoke({"input": query}, config={
-        "configurable": {"session_id": "abc123"}
-    })
-    print(result['answer'])
-    print()
-
+if __name__ == '__main__':
     query = None
+    if len(sys.argv) > 1:
+        query = sys.argv[1]
+
+    chatbot = Chatbot()
+
+    while True:
+        if not query:
+            query = input("Prompt: ")
+        if query in ['quit', 'q', 'exit']:
+            sys.exit()
+        result = chatbot.conversational_rag_chain().invoke({"input": query}, config={
+            "configurable": {"session_id": "abc123"}
+        })
+        print(result['answer'])
+        print()
+
+        query = None
